@@ -24,6 +24,7 @@ CustomUUID = {
 	ObservationTime: '234fd9f1-1d33-4128-b622-d052f0c402af',
 	ChanceRain: 'fc01b24f-cf7e-4a74-90db-1b427af1ffa3',
 	ForecastDay: '57f1d4b2-0e7e-4307-95b5-808750e2c1c7',
+	ForecastHour: '999ab0d6-a23c-4cc7-b5a2-2edb75447070',
 	SolarRadiation: '1819a23e-ecab-4d39-b29a-7364d299310b',
 	TemperatureMin: '707b78ca-51ab-4dc9-8630-80a58f07e419'
 },
@@ -235,6 +236,16 @@ module.exports = function (homebridge) {
 		this.value = this.getDefaultValue();
 	};
 	inherits(CustomCharacteristic.ForecastDay, Characteristic);
+
+	CustomCharacteristic.ForecastHour = function() {
+		Characteristic.call(this, 'Hour', CustomUUID.ForecastHour);
+		this.setProps({
+			format: Characteristic.Formats.STRING,
+			perms: [Characteristic.Perms.READ, Characteristic.Perms.NOTIFY]
+		});
+		this.value = this.getDefaultValue();
+	};
+	inherits(CustomCharacteristic.ForecastHour, Characteristic);
 }
 
 function WeatherStationPlatform(log, config) {
@@ -258,6 +269,9 @@ WeatherStationPlatform.prototype = {
 		let forecast1Day = new ForecastWeatherAccessory(this, 1);
 		let forecast2Day = new ForecastWeatherAccessory(this, 2);
 		let forecast3Day = new ForecastWeatherAccessory(this, 3);
+		let forecast0Hour = new HourlyWeatherAccessory(this, 0);
+		let forecast1Hour = new HourlyWeatherAccessory(this, 1);
+		let forecast2Hour = new HourlyWeatherAccessory(this, 2);
 
 		this.accessories.push(currentConditions);
 
@@ -267,6 +281,12 @@ WeatherStationPlatform.prototype = {
 		else if (this.forecastDays.indexOf('today') !== -1)
 		{
 			this.accessories.push(forecast0Day);
+		}
+		else if (this.forecastDays.indexOf('hours') !== -1)
+		{
+			this.accessories.push(forecast0Hour);
+			this.accessories.push(forecast1Hour);
+			this.accessories.push(forecast2Hour);
 		}
 		else
 		{
@@ -283,7 +303,7 @@ WeatherStationPlatform.prototype = {
 		let that = this;
 
 		debug("Update weather online");
-		this.station.conditions().forecast().request(this.location, function(err, response) {
+		this.station.conditions().forecast().hourlyForecast().request(this.location, function(err, response) {
 			if (!err) {
 				for (var i = 0; i < that.accessories.length; i++) {
 					if (that.accessories[i].currentConditionsService !== undefined && response['current_observation'] )
@@ -333,6 +353,24 @@ WeatherStationPlatform.prototype = {
 						service.setCharacteristic(CustomCharacteristic.WindSpeedMax,parseFloat(forecast[day]['maxwind']['kph']));
 						service.setCharacteristic(CustomCharacteristic.ConditionCategory, getConditionCategory(forecast[day]['icon']));
 					}
+					else if (that.accessories[i].hourlyService !== undefined && response['hourly_forecast'])
+					{
+						debug("Update values for " + that.accessories[i].hourlyService.displayName);
+						let forecast = response['hourly_forecast'];
+						let service = that.accessories[i].hourlyService;
+						let hour = that.accessories[i].hour
+						//let hour = 0;
+
+						service.setCharacteristic(CustomCharacteristic.ForecastDay, forecast[hour]['FCTTIME']['weekday_name']);
+						service.setCharacteristic(CustomCharacteristic.ForecastHour, forecast[hour]['FCTTIME']['civil']);
+						service.setCharacteristic(Characteristic.CurrentTemperature, forecast[hour]['temp']['metric']);
+						service.setCharacteristic(Characteristic.CurrentRelativeHumidity, parseInt(forecast[hour]['avehumidity']));
+						service.setCharacteristic(CustomCharacteristic.Condition, forecast[hour]['condition']);
+						service.setCharacteristic(CustomCharacteristic.ChanceRain, forecast[hour]['pop']);
+						service.setCharacteristic(CustomCharacteristic.WindDirection,forecast[hour]['wdir']['dir']);
+						service.setCharacteristic(CustomCharacteristic.WindSpeed,parseFloat(forecast[hour]['wspd']['metric']));
+						service.setCharacteristic(CustomCharacteristic.ConditionCategory, getConditionCategory(forecast[hour]['icon']));
+					}
 				}
 
 				if (!response['current_observation'])
@@ -353,6 +391,65 @@ WeatherStationPlatform.prototype = {
 		});
 		setTimeout(this.updateWeather.bind(this), (this.interval) * 60 * 1000);
 	}
+}
+
+function HourlyWeatherAccessory(platform, hourNum) {
+	this.platform = platform;
+	this.log = platform.log;
+	switch(hourNum) {
+		case 0:
+			this.name = "Next Hour";
+			break;
+		case 1:
+			this.name = "In 2 Hours";
+			break;
+		case 2:
+			this.name = "In 3 Hours";
+			break;
+		case 3:
+			this.name = "In 4 Hours";
+			break;
+	}
+	this.hour = hourNum;
+
+	this.hourlyService = new Service.TemperatureSensor(this.name);
+	this.hourlyService.addCharacteristic(CustomCharacteristic.ForecastDay);
+	this.hourlyService.addCharacteristic(CustomCharacteristic.ForecastHour);
+	this.hourlyService.addCharacteristic(Characteristic.CurrentRelativeHumidity);
+	this.hourlyService.addCharacteristic(CustomCharacteristic.Condition);
+	this.hourlyService.addCharacteristic(CustomCharacteristic.ConditionCategory);
+	this.hourlyService.addCharacteristic(CustomCharacteristic.ChanceRain);
+	this.hourlyService.addCharacteristic(CustomCharacteristic.WindDirection);
+	this.hourlyService.addCharacteristic(CustomCharacteristic.WindSpeed);
+
+	// fix negative temperatures not supported by homekit
+	this.hourlyService.getCharacteristic(Characteristic.CurrentTemperature).props.minValue = -50;
+
+	this.informationService = new Service.AccessoryInformation();
+	this.informationService
+	.setCharacteristic(Characteristic.Name, this.name)
+	.setCharacteristic(Characteristic.Manufacturer, "github.com/naofireblade")
+	.setCharacteristic(Characteristic.Model, "BB Weather Station Extended")
+
+}
+
+HourlyWeatherAccessory.prototype = {
+	identify: function (callback) {
+		let that = this;
+		this.platform.station.hourlyForecast().request(this.platform.location, function(err, response) {
+			if (err) {
+				that.log.error(err);
+			}
+			else {
+				that.log(response['hourly_forecast']);
+			}
+		});
+		callback();
+	},
+
+	getServices: function () {
+		return [this.informationService, this.hourlyService];
+	},
 }
 
 function CurrentConditionsWeatherAccessory(platform) {
