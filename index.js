@@ -26,7 +26,9 @@ CustomUUID = {
 	ForecastDay: '57f1d4b2-0e7e-4307-95b5-808750e2c1c7',
 	ForecastHour: '999ab0d6-a23c-4cc7-b5a2-2edb75447070',
 	SolarRadiation: '1819a23e-ecab-4d39-b29a-7364d299310b',
-	TemperatureMin: '707b78ca-51ab-4dc9-8630-80a58f07e419'
+	TemperatureMin: '707b78ca-51ab-4dc9-8630-80a58f07e419',
+	SnowedRecently: '959b7a86-b98c-4199-a305-724d21206b46',
+	SnowingSoon: 'd5910a60-4e85-4473-ab32-f2eeb9981772'
 },
 CustomCharacteristic = {};
 
@@ -227,6 +229,26 @@ module.exports = function (homebridge) {
 	};
 	inherits(CustomCharacteristic.ObservationTime, Characteristic);
 
+	CustomCharacteristic.SnowedRecently = function() {
+		Characteristic.call(this, 'Snowed Recently', CustomUUID.SnowedRecently);
+		this.setProps({
+			format: Characteristic.Formats.BOOL,
+			perms: [Characteristic.Perms.READ, Characteristic.Perms.NOTIFY]
+		});
+		this.value = this.getDefaultValue();
+	};
+	inherits(CustomCharacteristic.SnowedRecently, Characteristic);
+
+	CustomCharacteristic.SnowingSoon = function() {
+		Characteristic.call(this, 'Snowing Soon', CustomUUID.SnowingSoon);
+		this.setProps({
+			format: Characteristic.Formats.BOOL,
+			perms: [Characteristic.Perms.READ, Characteristic.Perms.NOTIFY]
+		});
+		this.value = this.getDefaultValue();
+	};
+	inherits(CustomCharacteristic.SnowingSoon, Characteristic);
+
 	CustomCharacteristic.ForecastDay = function() {
 		Characteristic.call(this, 'Day', CustomUUID.ForecastDay);
 		this.setProps({
@@ -256,6 +278,13 @@ function WeatherStationPlatform(log, config) {
 	this.station = new wunderground(config['key']);
 	this.interval = ('interval' in config ? parseInt(config['interval']) : 4);
 	this.interval = (typeof this.interval !=='number' || (this.interval%1)!==0 || this.interval < 0) ? 4 : this.interval;
+
+	// number of hours to consider "snowing soon" or "snowed recently"
+	this.snowHoursWindow = ('snowhours' in config ? parseInt(config['snowhours']) : 3);
+	this.snowHoursWindow = (typeof this.snowHoursWindow !=='number' || (this.snowHoursWindow%1)!==0 || this.snowHoursWindow < 0) ? 3 : this.snowHoursWindow;
+
+	// assume it hasn't snowed recently by default
+	this.lastSnowTime = new Date(0);
 
 	this.updateWeather();
 }
@@ -305,11 +334,29 @@ WeatherStationPlatform.prototype = {
 		debug("Update weather online");
 		this.station.conditions().forecast().hourlyForecast().request(this.location, function(err, response) {
 			if (!err) {
+				let futureHours = response['hourly_forecast'];
+				let conditions = response['current_observation'];
+				
+				// check if snowing now or in the next few hours
+				let snowSoon = getConditionCategory(conditions['icon']) == 3;
+				for (let hr=0; hr < that.snowHoursWindow; hr++) {
+					snowSoon = snowSoon || (getConditionCategory(futureHours[hr]['icon']) == 3);
+				}
+				let snowedRecently = snowSoon;
+
+				let now = new Date();
+				if (snowSoon){
+					that.lastSnowTime = now;
+				}
+				else {
+					let recentMillis = 1000 * 60 * 60 * that.snowHoursWindow;	// hours to millis
+					snowedRecently = (now.getTime() - that.lastSnowTime.getTime() < recentMillis)
+				}
+
 				for (var i = 0; i < that.accessories.length; i++) {
 					if (that.accessories[i].currentConditionsService !== undefined && response['current_observation'] )
 					{
 						debug("Update values for " + that.accessories[i].currentConditionsService.displayName);
-						let conditions = response['current_observation'];
 						let service = that.accessories[i].currentConditionsService;
 
 						service.setCharacteristic(Characteristic.CurrentTemperature, conditions['temp_c']);
@@ -332,6 +379,8 @@ WeatherStationPlatform.prototype = {
 						service.setCharacteristic(CustomCharacteristic.ObservationStation, conditions['observation_location']['full']);
 						service.setCharacteristic(CustomCharacteristic.ObservationTime, conditions['observation_time_rfc822'].split(' ')[4]);
 						service.setCharacteristic(CustomCharacteristic.ConditionCategory, getConditionCategory(conditions['icon']));
+						service.setCharacteristic(CustomCharacteristic.SnowingSoon, snowSoon);
+						service.setCharacteristic(CustomCharacteristic.SnowedRecently, snowedRecently);
 					}
 					else if (that.accessories[i].forecastService !== undefined && response['forecast'])
 					{
@@ -356,20 +405,18 @@ WeatherStationPlatform.prototype = {
 					else if (that.accessories[i].hourlyService !== undefined && response['hourly_forecast'])
 					{
 						debug("Update values for " + that.accessories[i].hourlyService.displayName);
-						let forecast = response['hourly_forecast'];
 						let service = that.accessories[i].hourlyService;
 						let hour = that.accessories[i].hour
-						//let hour = 0;
 
-						service.setCharacteristic(CustomCharacteristic.ForecastDay, forecast[hour]['FCTTIME']['weekday_name']);
-						service.setCharacteristic(CustomCharacteristic.ForecastHour, forecast[hour]['FCTTIME']['civil']);
-						service.setCharacteristic(Characteristic.CurrentTemperature, forecast[hour]['temp']['metric']);
-						service.setCharacteristic(Characteristic.CurrentRelativeHumidity, parseInt(forecast[hour]['avehumidity']));
-						service.setCharacteristic(CustomCharacteristic.Condition, forecast[hour]['condition']);
-						service.setCharacteristic(CustomCharacteristic.ChanceRain, forecast[hour]['pop']);
-						service.setCharacteristic(CustomCharacteristic.WindDirection,forecast[hour]['wdir']['dir']);
-						service.setCharacteristic(CustomCharacteristic.WindSpeed,parseFloat(forecast[hour]['wspd']['metric']));
-						service.setCharacteristic(CustomCharacteristic.ConditionCategory, getConditionCategory(forecast[hour]['icon']));
+						service.setCharacteristic(CustomCharacteristic.ForecastDay, futureHours[hour]['FCTTIME']['weekday_name']);
+						service.setCharacteristic(CustomCharacteristic.ForecastHour, futureHours[hour]['FCTTIME']['civil']);
+						service.setCharacteristic(Characteristic.CurrentTemperature, futureHours[hour]['temp']['metric']);
+						service.setCharacteristic(Characteristic.CurrentRelativeHumidity, parseInt(futureHours[hour]['avehumidity']));
+						service.setCharacteristic(CustomCharacteristic.Condition, futureHours[hour]['condition']);
+						service.setCharacteristic(CustomCharacteristic.ChanceRain, futureHours[hour]['pop']);
+						service.setCharacteristic(CustomCharacteristic.WindDirection,futureHours[hour]['wdir']['dir']);
+						service.setCharacteristic(CustomCharacteristic.WindSpeed,parseFloat(futureHours[hour]['wspd']['metric']));
+						service.setCharacteristic(CustomCharacteristic.ConditionCategory, getConditionCategory(futureHours[hour]['icon']));
 					}
 				}
 
@@ -429,7 +476,7 @@ function HourlyWeatherAccessory(platform, hourNum) {
 	this.informationService
 	.setCharacteristic(Characteristic.Name, this.name)
 	.setCharacteristic(Characteristic.Manufacturer, "github.com/naofireblade")
-	.setCharacteristic(Characteristic.Model, "BB Weather Station Extended")
+	.setCharacteristic(Characteristic.Model, "Weather Station Extended")
 
 }
 
@@ -472,6 +519,8 @@ function CurrentConditionsWeatherAccessory(platform) {
 	this.currentConditionsService.addCharacteristic(CustomCharacteristic.SolarRadiation);
 	this.currentConditionsService.addCharacteristic(CustomCharacteristic.ObservationStation);
 	this.currentConditionsService.addCharacteristic(CustomCharacteristic.ObservationTime);
+	this.currentConditionsService.addCharacteristic(CustomCharacteristic.SnowedRecently);
+	this.currentConditionsService.addCharacteristic(CustomCharacteristic.SnowingSoon);
 
 	// fix negative temperatures not supported by homekit
 	this.currentConditionsService.getCharacteristic(Characteristic.CurrentTemperature).props.minValue = -50;
